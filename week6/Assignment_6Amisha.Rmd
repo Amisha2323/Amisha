@@ -1,0 +1,161 @@
+---
+title: "Week 6 Assignment - Genetic Algorithm"
+author: "Amisha Meka"
+date: "2025-03-02"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(geosphere)
+library(GA)
+library(purrr)
+library(sf)
+
+## Load the population data
+pop.data <- data.table::fread("/Users/mekaamisha23/Downloads/Mo_pop_Sim.csv")
+str(pop.data)
+frac <- 0.0001
+small.data <- pop.data[sample(1:nrow(pop.data),
+                               size = round(nrow(pop.data) * frac),
+                               replace = F), ## extract a sample of randomlychosen 1% rows
+                        ]  ## and choose all columns
+
+## Load the FQHC data
+data_path <- 'MO_2018_Federally_Qualified_Health_Center_Locations'
+fqhc.data <- data.table(as.data.frame(st_read('/Users/mekaamisha23/Downloads/MO_2018_Federally_Qualified_Health_Center_Locations 2',
+                     'MO_2018_Federally_Qualified_Health_Center_Locations')))
+```
+
+
+Approach 1: Average Closeness of a Location to All Residences
+
+```{r}
+# Function to calculate the average distance of an FQHC to all residences
+average_distance <- function(fqhc_row, pop.data) {
+  distances <- distHaversine(
+    matrix(c(fqhc_row$Longitude, fqhc_row$Latitude), ncol = 2),
+    matrix(c(pop.data$long, pop.data$lat), ncol = 2)
+  )
+  return(mean(distances))
+}
+
+# Apply function to all FQHC locations
+fqhc.data[, avg_distance := sapply(1:.N, function(i) average_distance(fqhc.data[i], small.data))]
+
+# Select the top 8 FQHCs with the lowest average distance
+top_fqhc_closeness <- fqhc.data[order(avg_distance)][1:8]
+
+# Print selected FQHC locations
+print(top_fqhc_closeness)
+```
+
+
+Approach 2: Highest Population Density Within 30-Mile Radius
+```{r}
+# Define the radius
+radius <- 30 * 1609.34 
+
+# Function to count the number of population points within the 30-mile radius of an FQHC
+count_nearby_population <- function(fqhc_row, pop.data, radius) {
+  distances <- distHaversine(
+    matrix(c(fqhc_row$Longitude, fqhc_row$Latitude), ncol = 2),
+    matrix(c(pop.data$long, pop.data$lat), ncol = 2)
+  )
+  return(sum(distances <= radius))
+}
+
+# Apply function to all FQHC locations
+fqhc.data[, population_count := sapply(1:.N, function(i) count_nearby_population(fqhc.data[i], small.data, radius))]
+
+# Select the top 8 FQHCs with the highest population density
+top_fqhc_density <- fqhc.data[order(-population_count)][1:8]
+print(top_fqhc_density)
+```
+
+
+```{r}
+ga_fitness <- function(x) {
+  if(sum(x) != 8) {
+    return(0)
+  }
+  selected_fqhcs <- which(x == 1)
+  
+  total_covered <- 0
+  covered_flags <- rep(FALSE, nrow(small.data))
+  
+  for(fqhc_idx in selected_fqhcs) {
+    fqhc_row <- fqhc.data[fqhc_idx]
+    
+    distances <- distHaversine(
+      matrix(c(fqhc_row$Longitude, fqhc_row$Latitude), ncol = 2),
+      matrix(c(small.data$long, small.data$lat), ncol = 2)
+    )
+    newly_covered <- distances <= radius & !covered_flags
+    covered_flags <- covered_flags | (distances <= radius)
+    total_covered <- total_covered + sum(newly_covered)
+  }
+  
+  return(total_covered)
+}
+
+# Set up the genetic algorithm parameters
+ga_control <- gaControl(
+  popSize = 50,       
+  pcrossover = 0.8,   
+  pmutation = 0.1,     
+  maxiter = 100,       
+  run = 50,            
+  monitor = TRUE       
+)
+
+# Run the genetic algorithm
+set.seed(123)
+
+ga_result <- ga(
+  type = "binary",
+  fitness = ga_fitness,
+  nBits = nrow(fqhc.data),
+  popSize = 50,
+  maxiter = 100,
+  run = 50,
+  pmutation = 0.1, 
+  pcrossover = 0.8,
+  monitor = TRUE,
+  suggestions = rbind(
+    as.numeric(1:nrow(fqhc.data) %in% top_fqhc_closeness$oid),
+    as.numeric(1:nrow(fqhc.data) %in% top_fqhc_density$oid)   
+  )
+)
+
+# Get the best solution
+best_solution <- as.logical(ga_result@solution[1, ])
+ga_selected_fqhcs <- fqhc.data[best_solution]
+
+# Calculate the fitness of the GA solution
+ga_fitness_value <- ga_fitness(best_solution)
+
+# Calculate the fitness of the approach 1 solution
+approach1_solution <- as.numeric(1:nrow(fqhc.data) %in% top_fqhc_closeness$oid)
+approach1_fitness_value <- ga_fitness(approach1_solution)
+
+# Calculate the fitness of the approach 2 solution
+approach2_solution <- as.numeric(1:nrow(fqhc.data) %in% top_fqhc_density$oid)
+approach2_fitness_value <- ga_fitness(approach2_solution)
+
+cat("\n--- Comparison of Approaches ---\n")
+cat("Approach 1 (Average Closeness) Population Coverage:", approach1_fitness_value, "\n")
+cat("Approach 2 (Population Density) Population Coverage:", approach2_fitness_value, "\n")
+cat("Genetic Algorithm Population Coverage:", ga_fitness_value, "\n")
+print(ga_selected_fqhcs)
+```
+
+
+
+The preferred approach for site selection of FQHC mental health services locations will be Approach 2: Highest Population Density Within a 30-Mile Radius. Healthcare facilities serving specialized services should establish their presence to reach the most people effectively within their targeted service area. The selection of high-density residential areas within reachable distances allows the new services to reach the maximum number of potential clients. The main objective of public health planning seeks to enhance healthcare service accessibility which this planning strategy supports.
+
+According to this dimension the distance theory people will choose the closest accessible service facility while a 30-mile range stands as an attainable limit for mental healthcare travel. A 30-mile travel threshold serves as an appropriate indicator of accessibility throughout Missouri because it considers differences in healthcare access between urban and rural areas regardless of other factors like transportation infrastructure or socioeconomic status. The distribution of population serves as an accepted basis to understand mental health service requirements since areas with denser residents are predicted to need more mental health resources.
+
+This application determines fitness by counting the residential locations situated within thirty miles of each FQHC. The Haversine distance between each FQHC location and all residential points serves as the basis to determine which residences exist within a 30-mile area for calculating the final fitness score. Our optimization target focuses on the complete residential population situated inside a specified 30-mile region while our aim remains to achieve maximum population numbers in this area. The higher the population count around a given FQHC, the higher its relative fitness in this selection process. The metric optimization guarantees populations will receive services from the locations which serve the maximum number of clients thereby ensuring both accessibility and service impact.
+
+Population density represents the core objective of this procedure to establish new mental health services in regions that offer optimum care benefits to most area residents. Population density presents itself as a vital and logical determinant for selecting locations in this case due to its strong correlation with service utilization.
